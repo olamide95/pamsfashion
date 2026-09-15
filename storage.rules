@@ -1,0 +1,69 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myUid() {
+      return request.auth.uid;
+    }
+
+    // Storage rules cannot read Firestore directly in the same way as
+    // Firestore rules can chain get() calls cheaply, but Firestore *can*
+    // be queried from Storage rules via firestore.get() (available in
+    // rules_version 2). Used sparingly here for role checks only.
+    function myRole() {
+      return firestore.get(/databases/(default)/documents/users/$(myUid())).data.role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && myRole() == 'admin';
+    }
+
+    function isInstructor() {
+      return isSignedIn() && myRole() == 'instructor';
+    }
+
+    function isStaff() {
+      return isAdmin() || isInstructor();
+    }
+
+    // Course thumbnails, lesson videos and lesson resources: publicly
+    // readable (thumbnails need to render on the public course pages;
+    // videos/resources are still gated at the Firestore document level —
+    // a lesson doc's videoPath is only ever returned to enrolled students
+    // or staff per firestore.rules, so an unlisted download URL isn't
+    // handed out to the public in practice). Writes are staff-only.
+    match /courses/{courseId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    match /gallery/{allPaths=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // Assignment submissions: a student may only upload into their own
+    // folder; staff can read all submissions to review them.
+    match /submissions/{userId}/{allPaths=**} {
+      allow read: if isStaff() || (isSignedIn() && myUid() == userId);
+      allow write: if isSignedIn() && myUid() == userId
+        && request.resource.size < 25 * 1024 * 1024; // 25MB cap per file
+    }
+
+    // Certificate assets (e.g. generated PDF renders), if used.
+    match /certificates/{allPaths=**} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // Default deny for anything not explicitly matched above.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

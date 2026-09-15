@@ -1,0 +1,219 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* -------------------------------------------------------------- */
+    /* Helpers                                                         */
+    /* -------------------------------------------------------------- */
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myUid() {
+      return request.auth.uid;
+    }
+
+    // Reads the requesting user's own Firestore profile to check role.
+    // Cheap in practice: Firestore caches this get() within the same
+    // security-rule evaluation for repeated calls in one request.
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(myUid())).data.role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && myRole() == 'admin';
+    }
+
+    function isInstructor() {
+      return isSignedIn() && myRole() == 'instructor';
+    }
+
+    function isStaff() {
+      return isAdmin() || isInstructor();
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && myUid() == userId;
+    }
+
+    function courseData(courseId) {
+      return get(/databases/$(database)/documents/courses/$(courseId)).data;
+    }
+
+    function enrollmentPath(courseId) {
+      return /databases/$(database)/documents/enrollments/$(myUid() + '_' + courseId);
+    }
+
+    // The real access check for course content: an enrollment record must
+    // exist AND its paymentStatus must actually reflect access being
+    // granted ("not_required" for free courses, "paid" once a payment is
+    // confirmed) — not merely "pending". This is what stops a student from
+    // reaching paid lesson/quiz/assignment content by creating a bare
+    // enrollment doc client-side (existence alone used to be enough).
+    function hasActiveAccess(courseId) {
+      return isSignedIn() &&
+        exists(enrollmentPath(courseId)) &&
+        get(enrollmentPath(courseId)).data.paymentStatus in ['not_required', 'paid'];
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Users                                                            */
+    /* -------------------------------------------------------------- */
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      // A user may create their own profile on sign-up, but can never set
+      // their own role — role changes are admin-only.
+      allow create: if isOwner(userId) && request.resource.data.role == 'student';
+      allow update: if isAdmin()
+        || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Public marketing content — readable by anyone, writable by staff */
+    /* -------------------------------------------------------------- */
+
+    match /courses/{courseId} {
+      // NOTE: rules filter nothing. A list query here MUST carry
+      // where("status", "==", "published") unless the caller is staff —
+      // an unconstrained getDocs() on this collection is rejected outright
+      // because it could return drafts.
+      allow read: if resource.data.status == 'published' || isStaff();
+      allow write: if isStaff();
+    }
+
+    match /modules/{moduleId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    match /lessons/{lessonId} {
+      // Full lesson documents (including video paths) are only readable by
+      // staff or a student with confirmed access to that course — see
+      // hasActiveAccess() above. Public course pages read lesson *counts*
+      // via admin-side aggregation, not this collection.
+      //
+      // NOTE: because this condition depends on per-document courseId plus
+      // an exists() lookup, it is NOT satisfiable by a list query. Students
+      // must read lessons by ID (getDoc), not via where("courseId","==",x).
+      // Restructuring lessons as a subcollection of courses would let a
+      // list query work here.
+      allow read: if isStaff() || hasActiveAccess(resource.data.courseId);
+      allow write: if isStaff();
+    }
+
+    match /gallery/{imageId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    match /testimonials/{testimonialId} {
+      allow read: if resource.data.published == true || isStaff();
+      allow write: if isStaff();
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if resource.data.published == true || isStaff();
+      allow write: if isStaff();
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Admissions                                                       */
+    /* -------------------------------------------------------------- */
+
+    match /applications/{applicationId} {
+      // Anyone (including anonymous visitors) can submit an application,
+      // but only as "pending" and only staff can read or change status.
+      allow create: if request.resource.data.status == 'pending';
+      allow read, update, delete: if isStaff();
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Enrollment / progress — student owns their own records            */
+    /* -------------------------------------------------------------- */
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isStaff() || (isSignedIn() && resource.data.userId == myUid());
+
+      // Self-service creation is only for FREE courses, and only with the
+      // paymentStatus a free course actually earns ("not_required") — a
+      // student cannot self-create an enrollment claiming "paid" for a
+      // paid course. Staff can create any enrollment (e.g. after
+      // confirming an offline/manual payment or approving an application).
+      allow create: if isStaff() || (
+        isSignedIn() &&
+        request.resource.data.userId == myUid() &&
+        courseData(request.resource.data.courseId).isFree == true &&
+        request.resource.data.paymentStatus == 'not_required'
+      );
+
+      // Once created, only staff can change an enrollment (e.g. marking a
+      // paid course's paymentStatus "paid" after payment is confirmed) —
+      // a student can never upgrade their own enrollment's payment status.
+      allow update: if isStaff();
+      allow delete: if isStaff();
+    }
+
+    match /lessonProgress/{progressId} {
+      allow read: if isStaff() || (isSignedIn() && resource.data.userId == myUid());
+      allow write: if isSignedIn() &&
+        request.resource.data.userId == myUid() &&
+        (resource == null || resource.data.userId == myUid());
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Quizzes                                                          */
+    /* -------------------------------------------------------------- */
+
+    match /quizzes/{quizId} {
+      // Students can read quiz questions once they have active access —
+      // correct-answer exposure in the client is an accepted MVP
+      // trade-off; a Cloud Function that grades server-side is the
+      // hardened follow-up.
+      //
+      // Same list-query caveat as /lessons: read by ID.
+      allow read: if isStaff() || hasActiveAccess(resource.data.courseId);
+      allow write: if isStaff();
+    }
+
+    match /quizAttempts/{attemptId} {
+      allow read: if isStaff() || (isSignedIn() && resource.data.userId == myUid());
+      allow create: if isSignedIn() && request.resource.data.userId == myUid();
+      allow update, delete: if isStaff();
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Assignments / submissions                                        */
+    /* -------------------------------------------------------------- */
+
+    match /assignments/{assignmentId} {
+      // Same list-query caveat as /lessons: read by ID.
+      allow read: if isStaff() || hasActiveAccess(resource.data.courseId);
+      allow write: if isStaff();
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if isStaff() || (isSignedIn() && resource.data.userId == myUid());
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == myUid() &&
+        request.resource.data.status == 'pending_review';
+      // Students may not edit a submission after the fact; only staff can
+      // update it (to add a score/feedback and mark it reviewed).
+      allow update: if isStaff();
+      allow delete: if isStaff();
+    }
+
+    /* -------------------------------------------------------------- */
+    /* Certificates                                                     */
+    /* -------------------------------------------------------------- */
+
+    match /certificates/{certificateId} {
+      // Publicly readable so /verify-certificate/[id] works without login.
+      allow read: if true;
+      allow write: if isStaff();
+    }
+  }
+}
