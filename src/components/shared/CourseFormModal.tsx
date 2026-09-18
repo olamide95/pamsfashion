@@ -35,65 +35,104 @@ export function CourseFormModal({
   const [error, setError] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
+ async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+  e.preventDefault();
+  setSaving(true);
+  setError(null);
 
-    try {
-      const form = new FormData(e.currentTarget);
-      const title = String(form.get("title") ?? "").trim();
-      const isFree = form.get("isFree") === "on";
-      const thumbnailFile = form.get("thumbnail") as File | null;
+  try {
+    const form = new FormData(e.currentTarget);
+    const title = String(form.get("title") ?? "").trim();
+    const isFree = form.get("isFree") === "on";
+    const thumbnailFile = form.get("thumbnail") as File | null;
 
-      let thumbnailUrl = course?.thumbnailUrl;
-      if (thumbnailFile && thumbnailFile.size > 0) {
+    console.log("=== COURSE SAVE START ===");
+    console.log("Title:", title);
+    console.log("Editing course:", course);
+    console.log("Thumbnail file:", thumbnailFile);
+
+    let thumbnailUrl = course?.thumbnailUrl;
+
+    if (thumbnailFile && thumbnailFile.size > 0) {
+      const thumbnailPath = courseThumbnailPath(
+        course?.id ?? slugify(title),
+        thumbnailFile.name
+      );
+
+      console.log("THUMBNAIL PATH:", thumbnailPath);
+
+      try {
         thumbnailUrl = await uploadFile(
-          courseThumbnailPath(course?.id ?? slugify(title), thumbnailFile.name),
+          thumbnailPath,
           thumbnailFile,
           setUploadProgress
         );
+
+        console.log("THUMBNAIL URL:", thumbnailUrl);
+      } catch (error) {
+        console.error("THUMBNAIL UPLOAD FAILED:", error);
+        throw error;
       }
+    }
 
-      const payload = {
-        slug: course?.slug || slugify(title),
-        title,
-        shortDescription: String(form.get("shortDescription") ?? "").trim(),
-        fullDescription: String(form.get("fullDescription") ?? "").trim(),
-        thumbnailUrl,
-        outcomes: String(form.get("outcomes") ?? "")
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        requirements: String(form.get("requirements") ?? "")
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        duration: String(form.get("duration") ?? "").trim(),
-        format: form.get("format") as LearningFormat,
-        instructorName: String(form.get("instructorName") ?? "").trim() || undefined,
-        isFree,
-        price: isFree ? 0 : Number(form.get("price") ?? 0),
-        currency: String(form.get("currency") ?? "NGN"),
-        status: form.get("status") as Course["status"],
-        category: String(form.get("category") ?? "").trim() || undefined,
-        order: course?.order ?? nextOrder,
-      };
+    const payload = {
+      slug: course?.slug || slugify(title),
+      title,
+      shortDescription: String(form.get("shortDescription") ?? "").trim(),
+      fullDescription: String(form.get("fullDescription") ?? "").trim(),
+      thumbnailUrl,
+      outcomes: String(form.get("outcomes") ?? "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      requirements: String(form.get("requirements") ?? "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      duration: String(form.get("duration") ?? "").trim(),
+      format: form.get("format") as LearningFormat,
+      instructorName:
+        String(form.get("instructorName") ?? "").trim() || undefined,
+      isFree,
+      price: isFree ? 0 : Number(form.get("price") ?? 0),
+      currency: String(form.get("currency") ?? "NGN"),
+      status: form.get("status") as Course["status"],
+      category: String(form.get("category") ?? "").trim() || undefined,
+      order: course?.order ?? nextOrder,
+    };
 
+    console.log("COURSE PAYLOAD:", payload);
+
+    try {
       if (course) {
+        console.log("UPDATING COURSE:", course.id);
         await updateCourse(course.id, payload);
       } else {
+        console.log("CREATING COURSE");
         await createCourse(payload);
       }
-      onSaved();
-      onClose();
-    } catch {
-      setError("Something went wrong saving this course. Please try again.");
-    } finally {
-      setSaving(false);
-      setUploadProgress(null);
+
+      console.log("COURSE SAVE SUCCESS");
+    } catch (error) {
+      console.error("FIRESTORE COURSE SAVE FAILED:", error);
+      throw error;
     }
+
+    onSaved();
+    onClose();
+  } catch (error) {
+    console.error("COURSE SAVE ERROR:", error);
+
+    setError(
+      error instanceof Error
+        ? error.message
+        : "Something went wrong saving this course. Please try again."
+    );
+  } finally {
+    setSaving(false);
+    setUploadProgress(null);
   }
+}
 
   return (
     <Modal open={open} onClose={onClose} title={course ? "Edit Course" : "Create Course"}>
